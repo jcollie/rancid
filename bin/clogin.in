@@ -318,7 +318,7 @@ proc source_password_file { password_file } {
 # returns: 0 on success, 1 on failure, -1 if rsh was used successfully
 proc login { router user userpswd passwd enapasswd cmethod cyphertype identfile } {
     global command spawn_id in_proc do_command do_script platform passphrase
-    global prompt prompt_match u_prompt p_prompt e_prompt sshcmd
+    global prompt prompt_match u_prompt p_prompt e_prompt sshcmd usercmd usercmd_chat
     set in_proc 1
     set uprompt_seen 0
 
@@ -352,6 +352,22 @@ proc login { router user userpswd passwd enapasswd cmethod cyphertype identfile 
 		send_user "\nError: $cmd failed: $reason\n"
 		return 1
 	    }
+	} elseif [string match "usercmd" $prog] { # user supplies connect cmd
+		set retval [ catch {eval spawn $usercmd} reason ]
+		if { $retval } {
+		    send_user "\nError: '$usercmd' failed: $reason\n"
+		    exit 1
+		}
+		if { [llength $usercmd_chat] > 0 } {
+			#send_user "\nExecuting usercmd_chat: $usercmd_chat\n"
+			sleep 0.3
+			foreach {i j} $usercmd_chat {
+				expect {
+					-re $i { eval send "\"$j\""}
+					timeout { send "\r"; send_user "\nTimeout in usercmd_chat waiting for -re $i: punting with CR\n"; break }
+				}
+			}
+		}
 	} elseif ![string compare $prog "rsh"] {
 	    if { ! $do_command } {
 		if { [llength $cmethod] == 1 } {
@@ -851,6 +867,10 @@ foreach router [lrange $argv $i end] {
     # Figure out the SSH executable name
     set sshcmd [join [lindex [find sshcmd $router] 0] ""]
     if { "$sshcmd" == "" } { set sshcmd {ssh} }
+
+    # If user provides a router-specific connection method, use it
+    set usercmd [find usercmd $router]
+    set usercmd_chat [find usercmd_chat $router]
 
     # Login to the router
     if {[login $router $ruser $userpswd $passwd $enapasswd $cmethod $cyphertype $identfile]} {
