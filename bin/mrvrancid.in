@@ -39,9 +39,9 @@
 ## CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 ## ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 ## POSSIBILITY OF SUCH DAMAGE.
-#
+# 
 # Amazingly hacked version of Hank's rancid - this one tries to
-# deal with Cisco AGMs.
+# deal with MegaVision MRV.
 #
 #  RANCID - Really Awesome New Cisco confIg Differ
 #
@@ -57,6 +57,7 @@ $log = $opt_l;
 $debug = $opt_d;
 $file = $opt_f;
 $host = $ARGV[0];
+$ios = "IOS";
 $clean_run = 0;
 $found_end = 0;
 $found_version = 0;
@@ -64,8 +65,8 @@ $found_env = 0;
 $found_diag = 0;
 $timeo = 90;				# clogin timeout in seconds
 
-# the AGM kicks us off if it does not know our terminal type
-$ENV{'TERM'} = "dumb";
+# force a terminal type so as not to confuse the POS
+$ENV{'TERM'} = "vt100";
 
 my(@commandtable, %commands, @commands);# command lists
 my($aclsort) = ("ipsort");		# ACL sorting mode
@@ -175,62 +176,68 @@ sub sortbyipaddr {
 # This routine parses "show version"
 sub ShowVersion {
     print STDERR "    In ShowVersion: $_" if ($debug);
-    my($slaveslot);
 
     while (<INPUT>) {
 	tr/\015//d;
-	if (/^$prompt/) { $found_version=1; last};
+	if (/^$prompt/) { $found_version = 1; last};
 	next if (/^(\s*|\s*$cmd\s*)$/);
-	return(1) if /Line has invalid autocommand /;
 	return(1) if /(Invalid input detected|Type help or )/;
-	return(-1) if (/command authorization failed/i);
 	return(0) if ($found_version);		# Only do this routine once
-	# the pager can not be disabled per-session on the PIX
-	if (/^(-+More-+)/i) {
-	    my($len) = length($1);
-	    s/^$1\s{$len}//;
-	}
+	return(-1) if (/command authorization failed/i);
 
-	/^Cisco Anomaly Guard Image /i &&
-	    ProcessHistory("COMMENTS","keysort","B1", "! $_") && next;
-	/^MDM agent /i &&
-	    ProcessHistory("COMMENTS","keysort","B1", "! $_") && next;
+	/copyright/i && next;
+	/u-boot/i &&
+	    ProcessHistory("COMMENTS","keysort","C1", "!ROM: $_") && next;
+
+	ProcessHistory("COMMENTS","keysort","B1", "!Image: $_") && next;
     }
+    ProcessHistory("COMMENTS","","","!\n");
     return(0);
 }
 
-# This routine parses "show diag"
-# This will create arrarys for hw info.
-sub ShowDiag {
-    print STDERR "    In ShowDiag: $_" if ($debug);
+# This routine parses "show chassis" for the gsr
+# This will create arrays for hw info.
+sub ShowChassis {
+    # Skip if this is not a 1200n.
+    print STDERR "    In ShowChassis: $_" if ($debug);
 
     while (<INPUT>) {
 	tr/\015//d;
-	if (/^$prompt/) { $found_diag=1; last};
+	last if (/^$prompt/);
 	next if (/^(\s*|\s*$cmd\s*)$/);
-	return(1) if /Line has invalid autocommand /;
 	return(1) if /(Invalid input detected|Type help or )/;
-	return(-1) if (/general error/i);
 	return(-1) if (/command authorization failed/i);
-	return(0) if ($found_diag);		# Only do this routine once
-	return(-1) if (/failed to get counters/i);
-	/^$/ && next;
-	# the pager can not be disabled per-session on the PIX
-	if (/^(-+More-+)/i) {
-	    my($len) = length($1);
-	    s/^$1\s{$len}//;
+
+	if (/Chassis +Model/ || /=======/) {
+	    ProcessHistory("COMMENTS","keysort","C1","!$_");
+	    next;
 	}
-
-	/^Cisco Anomaly Guard Image /i && next;
-	/^... ... \d+ \d+:\d+:\d+ \w \d+$/ && next;
-	/^Copyright /i && next;
-	/^All rights /i && next;
-	/sample loss:/i && next;
-	/forward failures /i && next;
-
-	ProcessHistory("DIAG","keysort","C1","! $_");
+	# Trim the temp from the end of the slot line
+	chomp; s/\s+$//;
+	s/\S+$//;
+	ProcessHistory("COMMENTS","keysort","C1","!$_\n");
     }
-    ProcessHistory("DIAG","","","!\n");
+    ProcessHistory("COMMENTS","","","!\n");
+    return(0);
+}
+
+# This routine parses "show slots".
+sub ShowSlots {
+    print STDERR "    In ShowSlots: $_" if ($debug);
+
+    while (<INPUT>) {
+	tr/\015//d;
+	return if (/^\s*\^$/);
+	last if (/online diag status/i);
+	last if (/^$prompt/);
+	next if (/^(\s*|\s*$cmd\s*)$/);
+	return(-1) if (/command authorization failed/i);
+
+	ProcessHistory("SLOTS","","","!$_");
+	next;
+    }
+    ProcessHistory("SLOTS","","","!\n");
+
     return(0);
 }
 
@@ -244,21 +251,26 @@ sub WriteTerm {
 	last if (/^$prompt/);
 	return(1) if /Line has invalid autocommand /;
 	return(1) if (/(Invalid input detected|Type help or )/i);
+	return(0) if ($found_end);		# Only do this routine once
 	return(-1) if (/command authorization failed/i);
-	# the pager can not be disabled per-session on the PIX
-	if (/^(-+More-+)/i) {
-	    my($len) = length($1);
-	    s/^$1\s{$len}//;
-	}
 
 	/Non-Volatile memory is in use/  && return(-1); # NvRAM is locked
-	return(0) if ($found_end);		# Only do this routine once
 	$linecnt++;
 	$lineauto = 0 if (/^[^ ]/);
+	# skip the crap
+	if (/^(##+$|(Building|Current) configuration)/i) {
+	    while (<INPUT>) {
+		next if (/^Current configuration\s*:/i);
+		next if (/^:/);
+		next if (/^([%!].*|\s*)$/);
+		last;
+	    }
+	    tr/\015//d;
+	}
 
-	# skip consecutive comment/blank lines to avoid oscillating extra
-	# comment line on some access servers.  grrr.
-	if (/^!/ || /^$/) {
+	# skip consecutive comment lines to avoid oscillating extra comment
+	# line on some access servers.  grrr.
+	if (/^!/) {
 	    next if ($comment);
 	    ProcessHistory("","","",$_);
 	    $comment++;
@@ -273,34 +285,18 @@ sub WriteTerm {
 	/^ width /		&& next; # kill width on serial lines
 	$lineauto = 1 if /^ modem auto/;
 	/^ speed / && $lineauto	&& next; # kill speed on serial lines
-	/^ clockrate /		&& next; # kill clockrate on serial interfaces
-	if (/^(enable )?(password|passwd)( level \w+)? encrypted ((.)\S+)/) {
-	    if ($filter_pwds >= 2) {
-		ProcessHistory("USER","keysort","$1",
-			       "!$1$2$3 encrypted <removed>\n");
-	    } elsif ($filter_pwds >= 1 && $5 ne "\$") {
-		ProcessHistory("USER","keysort","$1",
-			        "!$1$2$3 encrypted <removed>\n");
-	    } else {
-		ProcessHistory("USER","keysort","$1","$_");
-	    }
-	    next;
-	}
-
-	if ((/^(enable )?(password|passwd)( level \w+)? encrypted [^\$]/ &&
-	    $filter_pwds >= 1) ||
-	    (/^(enable )?(password|passwd)( level \w+)? encrypted [^\$]/ &&
-	    $filter_pwds >= 2)) {
+	if (/^(enable )?(password|passwd)( level \d+)? / && $filter_pwds >= 1) {
 	    ProcessHistory("ENABLE","","","!$1$2$3 <removed>\n");
 	    next;
 	}
-	if (/^username (\S+)(\s.*)? encrypted ((.)\S+)/) {
+	if (/^(enable secret) / && $filter_pwds >= 2) {
+	    ProcessHistory("ENABLE","","","!$1 <removed>\n");
+	    next;
+	}
+	if (/^username (\S+)(\s.*)? password (encrypted \S+|\S+)(\sclass .*$)/){
 	    if ($filter_pwds >= 2) {
 		ProcessHistory("USER","keysort","$1",
-			       "!username $1$2 encrypted <removed>\n");
-	    } elsif ($filter_pwds >= 1 && $4 ne "\$") {
-		ProcessHistory("USER","keysort","$1",
-			       "!username $1$2 encrypted <removed>\n");
+			       "!username $1$2 password <removed>$4\n");
 	    } else {
 		ProcessHistory("USER","keysort","$1","$_");
 	    }
@@ -310,23 +306,32 @@ sub WriteTerm {
 	    ProcessHistory("LINE-PASS","","","!$1password <removed>\n");
 	    next;
 	}
-	if (/^(\s*)secret / && $filter_pwds >= 2) {
-	    ProcessHistory("LINE-PASS","","","!$1secret <removed>\n");
-	    next;
-	}
+
 	# filter out any RCS/CVS tags to avoid confusing local CVS storage
 	s/\$(Revision|Id):/ $1:/;
+	# order access-lists
+	/^access-list\s+(\d\d?)\s+(\S+)\s+(\S+)/ &&
+	    ProcessHistory("ACL $1 $2","$aclsort","$3","$_") && next;
+	# order extended access-lists
+	/^access-list\s+(\d\d\d)\s+(\S+)\s+ip\s+host\s+(\S+)/ &&
+	    ProcessHistory("EACL $1 $2","$aclsort","$3","$_") && next;
+	/^access-list\s+(\d\d\d)\s+(\S+)\s+ip\s+(\d\S+)/ &&
+	    ProcessHistory("EACL $1 $2","$aclsort","$3","$_") && next;
+	/^access-list\s+(\d\d\d)\s+(\S+)\s+ip\s+any/ &&
+	    ProcessHistory("EACL $1 $2","$aclsort","0.0.0.0","$_") && next;
 	# order arp lists
 	/^arp\s+(\d+\.\d+\.\d+\.\d+)\s+/ &&
 	    ProcessHistory("ARP","$aclsort","$1","$_") && next;
-
+	/^ip prefix-list\s+(\S+)\s+seq\s+(\d+)\s+(permit|deny)\s+(\d\S+)(\/.*)$/ &&
+	    ProcessHistory("PACL $1 $3","$aclsort","$4","ip prefix-list $1 $3 $4$5\n")
+	    && next;
 	# order logging statements
-	/^logging host (\d+\.\d+\.\d+\.\d+)/ &&
+	/^logging (\d+\.\d+\.\d+\.\d+)/ &&
 	    ProcessHistory("LOGGING","ipsort","$1","$_") && next;
 	# order/prune snmp-server host statements
 	# we only prune lines of the form
 	# snmp-server host a.b.c.d <community>
-	if (/^snmp-server trap-dest (\d+\.\d+\.\d+\.\d+) /) {
+	if (/^snmp-server host (\d+\.\d+\.\d+\.\d+) /) {
 	    if ($filter_commstr) {
 		my($ip) = $1;
 		my($line) = "snmp-server host $ip";
@@ -353,22 +358,19 @@ sub WriteTerm {
 	    }
 	    next;
 	}
-	if (/^(snmp community) (\S+)/) {
+	if (/^(snmp-server community) (\S+)/) {
 	    if ($filter_commstr) {
-		ProcessHistory("SNMPSERVERCOMM","keysort","$_","!$1 <removed>$'") && next;
+		ProcessHistory("SNMPSERVERCOMM","keysort","$_",
+			       "!$1 <removed>$'") && next;
 	    } else {
 		ProcessHistory("SNMPSERVERCOMM","keysort","$_","$_") && next;
 	    }
 	}
 	# prune tacacs/radius server keys
-	if (/^((tacacs-server|radius-server)\s(\w*[-\s(\s\S+])*\s?key) \d \w+/
-							&& $filter_pwds >= 1) {
-	    ProcessHistory("","","","!$1 <removed>$'"); next;
-	}
-
-	# delete ntp auth password - this md5 is a reversable too
-	if (/^(ntp authentication-key \d+ md5) / && $filter_pwds >= 1) {
-	    ProcessHistory("","","","!$1 <removed>\n"); next;
+	# radius-server host <1-5> IP SECRET [<ip port> [TIMEOUT [RETRY]]] 
+	if (/^((tacacs|radius)-server)\s(\d+\.\d+\.\d+\.\d+)\s(\w*)/
+	    && $filter_pwds >= 1) {
+	    ProcessHistory("","","","!$1 $2 <removed>$'"); next;
 	}
 	# order ntp peers/servers
 	if (/^ntp (server|peer) (\d+)\.(\d+)\.(\d+)\.(\d+)/) {
@@ -379,18 +381,13 @@ sub WriteTerm {
 
 	# catch anything that wasnt matched above.
 	ProcessHistory("","","","$_");
-	# end of config.  the ": " game is for the PIX
-	if (/^(: +)?end$/) {
-	    $found_end = 1;
-	    return(1);
-	}
     }
-    # The AGM lacks a definitive "end of config" marker.  If we have seen at
-    # least 5 lines of write term o/p, we can be reasonably sure that we got
-    # the config.
+    # The MRV MCC lacks a definitive "end of config" marker.  If we have seen
+    # at least 5 lines of show config output, we can be reasonably sure that
+    # we got the config.
     if ($linecnt > 5) {
 	$found_end = 1;
-	return(1);
+	return(0);
     }
 
     return(0);
@@ -402,16 +399,17 @@ sub DoNothing {print STDOUT;}
 # Main
 @commandtable = (
 	{'show version'			=> 'ShowVersion'},
-	{'show diagnostic-info'		=> 'ShowDiag'},
-	{'show running-config'		=> 'WriteTerm'},
+	{'show chassis'			=> 'ShowChassis'},
+	{'show slots'			=> 'ShowSlots'},
+	{'show running-config'		=> 'WriteTerm'}
 );
 # Use an array to preserve the order of the commands and a hash for mapping
 # commands to the subroutine and track commands that have been completed.
 @commands = map(keys(%$_), @commandtable);
 %commands = map(%$_, @commandtable);
 
-$cisco_cmds=join(";",@commands);
-$cmds_regexp=join("|",@commands);
+$cisco_cmds = join(";",@commands);
+$cmds_regexp = join("|",@commands);
 
 if (length($host) == 0) {
     if ($file) {
@@ -432,13 +430,13 @@ if ($file) {
     print STDOUT "opening file $host\n" if ($log);
     open(INPUT,"<$host") || die "open failed for $host: $!\n";
 } else {
-    print STDERR "executing hlogin -t $timeo -c\"$cisco_cmds\" $host\n" if ($debug);
-    print STDOUT "executing hlogin -t $timeo -c\"$cisco_cmds\" $host\n" if ($log);
+    print STDERR "executing clogin -t $timeo -c\"$cisco_cmds\" $host\n" if ($debug);
+    print STDOUT "executing clogin -t $timeo -c\"$cisco_cmds\" $host\n" if ($log);
     if (defined($ENV{NOPIPE})) {
-	system "hlogin -t $timeo -c \"$cisco_cmds\" $host </dev/null > $host.raw 2>&1" || die "hlogin failed for $host: $!\n";
-	open(INPUT, "< $host.raw") || die "hlogin failed for $host: $!\n";
+	system "mrvlogin -t $timeo -c \"$cisco_cmds\" $host </dev/null > $host.raw 2>&1" || die "clogin failed for $host: $!\n";
+	open(INPUT, "< $host.raw") || die "clogin failed for $host: $!\n";
     } else {
-	open(INPUT,"hlogin -t $timeo -c \"$cisco_cmds\" $host </dev/null |") || die "hlogin failed for $host: $!\n";
+	open(INPUT,"mrvlogin -t $timeo -c \"$cisco_cmds\" $host </dev/null |") || die "mrvlogin failed for $host: $!\n";
     }
 }
 
@@ -462,19 +460,15 @@ if ($ENV{"FILTER_PWDS"} =~ /no/i) {
     $filter_pwds = 1;
 }
 
-ProcessHistory("","","","!RANCID-CONTENT-TYPE: AGM\n!\n");
+ProcessHistory("","","","!RANCID-CONTENT-TYPE: mrv\n!\n");
 ProcessHistory("COMMENTS","keysort","B0","!\n");
 ProcessHistory("COMMENTS","keysort","C0","!\n");
 TOP: while(<INPUT>) {
     tr/\015//d;
-    if (/[>#]\s?exit$/) {
-	$clean_run=1;
-	last;
-    }
     if (/^Error:/) {
 	print STDOUT ("$host clogin error: $_");
 	print STDERR ("$host clogin error: $_") if ($debug);
-	$clean_run=0;
+	$clean_run = 0;
 	last;
     }
     while (/#\s*($cmds_regexp)\s*$/) {
@@ -496,10 +490,10 @@ TOP: while(<INPUT>) {
 	    $clean_run = 0;
 	    last TOP;
 	}
-	if (/[>#]\s?exit$/) {
-	    $clean_run=1;
-	    last;
-	}
+    }
+    if (/[>#]\s?exit$/) {
+	$clean_run = 1;
+	last;
     }
 }
 print STDOUT "Done $logincmd: $_\n" if ($log);

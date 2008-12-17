@@ -40,8 +40,7 @@
 ## ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 ## POSSIBILITY OF SUCH DAMAGE.
 #
-# Amazingly hacked version of Hank's rancid - this one tries to
-# deal with Cisco AGMs.
+# This version of rancid tries to deal with F5 BigIPs.
 #
 #  RANCID - Really Awesome New Cisco confIg Differ
 #
@@ -59,13 +58,10 @@ $file = $opt_f;
 $host = $ARGV[0];
 $clean_run = 0;
 $found_end = 0;
-$found_version = 0;
-$found_env = 0;
-$found_diag = 0;
 $timeo = 90;				# clogin timeout in seconds
 
-# the AGM kicks us off if it does not know our terminal type
-$ENV{'TERM'} = "dumb";
+# force a terminal type so as not to confuse the POS
+$ENV{'TERM'} = "vt100";
 
 my(@commandtable, %commands, @commands);# command lists
 my($aclsort) = ("ipsort");		# ACL sorting mode
@@ -172,203 +168,319 @@ sub sortbyipaddr {
     &ipaddrval($a) <=> &ipaddrval($b);
 }
 
-# This routine parses "show version"
-sub ShowVersion {
-    print STDERR "    In ShowVersion: $_" if ($debug);
-    my($slaveslot);
-
-    while (<INPUT>) {
-	tr/\015//d;
-	if (/^$prompt/) { $found_version=1; last};
-	next if (/^(\s*|\s*$cmd\s*)$/);
-	return(1) if /Line has invalid autocommand /;
-	return(1) if /(Invalid input detected|Type help or )/;
-	return(-1) if (/command authorization failed/i);
-	return(0) if ($found_version);		# Only do this routine once
-	# the pager can not be disabled per-session on the PIX
-	if (/^(-+More-+)/i) {
-	    my($len) = length($1);
-	    s/^$1\s{$len}//;
-	}
-
-	/^Cisco Anomaly Guard Image /i &&
-	    ProcessHistory("COMMENTS","keysort","B1", "! $_") && next;
-	/^MDM agent /i &&
-	    ProcessHistory("COMMENTS","keysort","B1", "! $_") && next;
-    }
-    return(0);
-}
-
-# This routine parses "show diag"
-# This will create arrarys for hw info.
-sub ShowDiag {
-    print STDERR "    In ShowDiag: $_" if ($debug);
-
-    while (<INPUT>) {
-	tr/\015//d;
-	if (/^$prompt/) { $found_diag=1; last};
-	next if (/^(\s*|\s*$cmd\s*)$/);
-	return(1) if /Line has invalid autocommand /;
-	return(1) if /(Invalid input detected|Type help or )/;
-	return(-1) if (/general error/i);
-	return(-1) if (/command authorization failed/i);
-	return(0) if ($found_diag);		# Only do this routine once
-	return(-1) if (/failed to get counters/i);
-	/^$/ && next;
-	# the pager can not be disabled per-session on the PIX
-	if (/^(-+More-+)/i) {
-	    my($len) = length($1);
-	    s/^$1\s{$len}//;
-	}
-
-	/^Cisco Anomaly Guard Image /i && next;
-	/^... ... \d+ \d+:\d+:\d+ \w \d+$/ && next;
-	/^Copyright /i && next;
-	/^All rights /i && next;
-	/sample loss:/i && next;
-	/forward failures /i && next;
-
-	ProcessHistory("DIAG","keysort","C1","! $_");
-    }
-    ProcessHistory("DIAG","","","!\n");
-    return(0);
-}
-
-# This routine processes a "write term"
-sub WriteTerm {
-    print STDERR "    In WriteTerm: $_" if ($debug);
-    my($lineauto,$comment,$linecnt) = (0,0,0);
+# This routine parses "bigpipe base list"
+sub ShowBaseRun {
+    my($line) = (0);
+    print STDERR "    In ShowBaseRun: $_" if ($debug);
 
     while (<INPUT>) {
 	tr/\015//d;
 	last if (/^$prompt/);
-	return(1) if /Line has invalid autocommand /;
-	return(1) if (/(Invalid input detected|Type help or )/i);
+	next if (/^(\s*|\s*$cmd\s*)$/);
+	return(1) if /^\s*\^\s*$/;
+	return(1) if /(Invalid input detected|Type help or )/;
 	return(-1) if (/command authorization failed/i);
-	# the pager can not be disabled per-session on the PIX
-	if (/^(-+More-+)/i) {
-	    my($len) = length($1);
-	    s/^$1\s{$len}//;
+
+	if (!$line++) {
+	    ProcessHistory("SHOWBASE","","","#\n#base:\n");
+	}
+	ProcessHistory("SHOWBASE","","","# $_") && next;
+    }
+    return(0);
+}
+
+# This routine parses "bigpipe db show"
+sub ShowDb {
+    my($line) = (0);
+    print STDERR "    In ShowDb: $_" if ($debug);
+
+    while (<INPUT>) {
+	tr/\015//d;
+	last if (/^$prompt/);
+	next if (/^(\s*|\s*$cmd\s*)$/);
+	return(1) if /^\s*\^\s*$/;
+	return(1) if /(Invalid input detected|Type help or )/;
+	return(-1) if (/command authorization failed/i);
+
+	if (!$line++) {
+	    ProcessHistory("SHOWDB","","","#\n#database:\n");
+	}
+	/UCS.LoadTime/ && next;
+	/Configsync.LocalConfigTime/ && next;
+	/LTM.ConfigTime/ && next;
+
+	if (/^(snmp\..*\.community\..* =) (.+)/i) {
+	    if ($filter_commstr) {
+		ProcessHistory("SHOWDB","","","# $1 <removed>\n") && next;
+	    } else {
+		ProcessHistory("SHOWDB","","","# $1 $2\n") && next;
+	    }
 	}
 
-	/Non-Volatile memory is in use/  && return(-1); # NvRAM is locked
-	return(0) if ($found_end);		# Only do this routine once
-	$linecnt++;
-	$lineauto = 0 if (/^[^ ]/);
+	ProcessHistory("SHOWDB","","","# $_") && next;
+    }
+    return(0);
+}
 
-	# skip consecutive comment/blank lines to avoid oscillating extra
-	# comment line on some access servers.  grrr.
-	if (/^!/ || /^$/) {
-	    next if ($comment);
-	    ProcessHistory("","","",$_);
-	    $comment++;
+# This routine parses "cat /config/bigip.license"
+sub ShowLicense {
+    my($line) = (0);
+    print STDERR "    In ShowLicense: $_" if ($debug);
+
+    while (<INPUT>) {
+	tr/\015//d;
+	# v9 software license does not have CR at EOF
+	s/^#-+($prompt.*)/$1/;
+	last if (/^$prompt/);
+	next if (/^(\s*|\s*$cmd\s*)$/);
+	return(1) if /^\s*\^\s*$/;
+	return(1) if /(Invalid input detected|Type help or )/;
+	return(-1) if (/command authorization failed/i);
+
+	if (!$line++) {
+	    ProcessHistory("LICENSE","","","#\n#/config/bigip.license:\n");
+	}
+	ProcessHistory("LICENSE","","","# $_") && next;
+    }
+    return(0);
+}
+
+# This routine parses "bigpipe monitor list all"
+sub ShowMonitor {
+    my($line) = (0);
+    print STDERR "    In ShowMonitor: $_" if ($debug);
+
+    while (<INPUT>) {
+	tr/\015//d;
+	last if (/^$prompt/);
+	next if (/^(\s*|\s*$cmd\s*)$/);
+	return(1) if /^\s*\^\s*$/;
+	return(1) if /(Invalid input detected|Type help or )/;
+	return(-1) if (/command authorization failed/i);
+
+	if (!$line++) {
+	    ProcessHistory("MONITOR","","","#\n");
+	}
+	if (/^(snmp\.[^ ]+\.community) = (.+)/i) {
+	    if ($filter_commstr) {
+		ProcessHistory("SHOWDB","","","# $1 <removed>\n") && next;
+	    } else {
+		ProcessHistory("SHOWDB","","","# $1 $2\n") && next;
+	    }
+	}
+	if (/^(\s*)password / && $filter_pwds >= 1) {
+	    ProcessHistory("LINE-PASS","","","# $1password <removed>\n");
 	    next;
 	}
-	$comment = 0;
 
-	# Dog gone Cool matches to process the rest of the config
-	/^tftp-server flash /   && next; # kill any tftp remains
-	/^ntp clock-period /    && next; # kill ntp clock-period
-	/^ length /		&& next; # kill length on serial lines
-	/^ width /		&& next; # kill width on serial lines
-	$lineauto = 1 if /^ modem auto/;
-	/^ speed / && $lineauto	&& next; # kill speed on serial lines
-	/^ clockrate /		&& next; # kill clockrate on serial interfaces
-	if (/^(enable )?(password|passwd)( level \w+)? encrypted ((.)\S+)/) {
+	ProcessHistory("MONITOR","","","# $_") && next;
+    }
+    return(0);
+}
+
+# This routine parses "bigpipe platform"
+sub ShowPlatform {
+    print STDERR "    In ShowPlatform: $_" if ($debug);
+
+    while (<INPUT>) {
+	tr/\015//d;
+	last if (/^$prompt/);
+	next if (/^(\s*|\s*$cmd\s*)$/);
+	return(1) if /^\s*\^\s*$/;
+	return(1) if /(Invalid input detected|Type help or )/;
+	return(-1) if (/command authorization failed/i);
+
+	/fan speed/i && next;
+	/chassis temperature/i && next;
+	/degC/ && next;
+	s/^\|//;
+	/Type: / && ProcessHistory("COMMENTS","keysort","A0",
+				   "#Chassis type: $'");
+
+	ProcessHistory("COMMENTS","keysort","B1","#$_") && next;
+    }
+    return(0);
+}
+
+# This routine parses "bigpipe profile list"
+sub ShowProfile {
+    print STDERR "    In ShowProfile: $_" if ($debug);
+
+    while (<INPUT>) {
+	tr/\015//d;
+	last if (/^$prompt/);
+	next if (/^(\s*|\s*$cmd\s*)$/);
+	return(1) if /^\s*\^\s*$/;
+	return(1) if /(Invalid input detected|Type help or )/;
+	return(-1) if (/command authorization failed/i);
+
+	ProcessHistory("PROFILE","",""," $_") && next;
+    }
+    return(0);
+}
+
+# This routine parses "ls --full-time --color=never /config/ssl/ssl.key"
+sub ShowSslKey {
+    print STDERR "    In ShowSslKey: $_" if ($debug);
+
+    while (<INPUT>) {
+	tr/\015//d;
+	# v9 software license does not have CR at EOF
+	s/^#-+($prompt.*)/$1/;
+	last if (/^$prompt/);
+	next if (/^(\s*|\s*$cmd\s*)$/);
+	return(1) if /^\s*\^\s*$/;
+	return(1) if /(Invalid input detected|Type help or )/;
+	return(-1) if (/command authorization failed/i);
+
+	ProcessHistory("SSLKEY","","","# $_") && next;
+    }
+    return(0);
+}
+
+# This routine parses "ls --full-time --color=never /config/ssl/ssl.crt"
+sub ShowSslCrt {
+    print STDERR "    In ShowSslCrt: $_" if ($debug);
+
+    while (<INPUT>) {
+	tr/\015//d;
+	# v9 software license does not have CR at EOF
+	s/^#-+($prompt.*)/$1/;
+	last if (/^$prompt/);
+	next if (/^(\s*|\s*$cmd\s*)$/);
+	return(1) if /^\s*\^\s*$/;
+	return(1) if /(Invalid input detected|Type help or )/;
+	return(-1) if (/command authorization failed/i);
+
+	ProcessHistory("SSLCRT","","","# $_") && next;
+    }
+    return(0);
+}
+
+# This routine parses "bigpipe route static show"
+sub ShowRouteStatic {
+    print STDERR "    In ShowRouteStatic: $_" if ($debug);
+
+    while (<INPUT>) {
+	tr/\015//d;
+	last if (/^$prompt/);
+	next if (/^(\s*|\s*$cmd\s*)$/);
+	return(1) if /^\s*\^\s*$/;
+	return(1) if /(Invalid input detected|Type help or )/;
+	return(-1) if (/command authorization failed/i);
+
+	ProcessHistory("ROUTE","",""," $_") && next;
+    }
+    return(0);
+}
+
+# This routine parses "bigpipe version"
+sub ShowVersion {
+    print STDERR "    In ShowVersion: $_" if ($debug);
+
+    while (<INPUT>) {
+	tr/\015//d;
+	last if (/^$prompt/);
+	next if (/^(\s*|\s*$cmd\s*)$/);
+	return(-1) if (/command authorization failed/i);
+
+	/^kernel:/i && ($_ = <INPUT>) &&
+	    ProcessHistory("COMMENTS","keysort","A3","#Image: Kernel: $_") &&
+	    next;
+	if (/^package:/i) {
+	    my($line);
+
+	    while ($_ = <INPUT>) {
+		tr/\015//d;
+		last if (/:/);
+		last if (/^$prompt/);
+		chomp;
+		$line .= " $_";
+	    }
+	    ProcessHistory("COMMENTS","keysort","A2",
+			   "#Image: Package:$line\n");
+	}
+
+	if (/:/) {
+	    ProcessHistory("COMMENTS","keysort","C1","#$_");
+	} else {
+	    ProcessHistory("COMMENTS","keysort","C1","#\t$_");
+	}
+    }
+    return(0);
+}
+
+# This routine processes a "bigpipe list"
+sub WriteTerm {
+    my($lines) = 0;
+    print STDERR "    In WriteTerm: $_" if ($debug);
+
+    while (<INPUT>) {
+	tr/\015//d;
+	next if (/^\s*$/);
+	# end of config - hopefully.  f5 does not have a reliable end-of-config
+	# tag.
+	if (/^$prompt/) {
+	    $found_end++;
+	    last;
+	}
+	return(-1) if (/command authorization failed/i);
+	# the pager can not be disabled per-session on the PIX
+	s/^<-+ More -+>\s*//;
+	/Non-Volatile memory is in use/  && return(-1); # NvRAM is locked
+	# filter out any RCS/CVS tags to avoid confusing local CVS storage
+	s/\$(Revision|Id):/ $1:/;
+	$lines++;
+
+	if (/^(enable )?(password|passwd) / && $filter_pwds >= 1) {
+	    ProcessHistory("ENABLE","","","! $1$2 <removed>\n");
+	    next;
+	}
+	if (/^(enable secret) / && $filter_pwds >= 2) {
+	    ProcessHistory("ENABLE","","","# $1 <removed>\n");
+	    next;
+	}
+	if (/^username (\S+)(\s.*)? secret /) {
 	    if ($filter_pwds >= 2) {
-		ProcessHistory("USER","keysort","$1",
-			       "!$1$2$3 encrypted <removed>\n");
-	    } elsif ($filter_pwds >= 1 && $5 ne "\$") {
-		ProcessHistory("USER","keysort","$1",
-			        "!$1$2$3 encrypted <removed>\n");
+		ProcessHistory("USER","keysort","$1","# username $1$2 secret <removed>\n");
 	    } else {
 		ProcessHistory("USER","keysort","$1","$_");
 	    }
 	    next;
 	}
-
-	if ((/^(enable )?(password|passwd)( level \w+)? encrypted [^\$]/ &&
-	    $filter_pwds >= 1) ||
-	    (/^(enable )?(password|passwd)( level \w+)? encrypted [^\$]/ &&
-	    $filter_pwds >= 2)) {
-	    ProcessHistory("ENABLE","","","!$1$2$3 <removed>\n");
-	    next;
-	}
-	if (/^username (\S+)(\s.*)? encrypted ((.)\S+)/) {
-	    if ($filter_pwds >= 2) {
-		ProcessHistory("USER","keysort","$1",
-			       "!username $1$2 encrypted <removed>\n");
-	    } elsif ($filter_pwds >= 1 && $4 ne "\$") {
-		ProcessHistory("USER","keysort","$1",
-			       "!username $1$2 encrypted <removed>\n");
+	if (/^username (\S+)(\s.*)? password ((\d) \S+|\S+)/) {
+	    if ($filter_pwds == 2) {
+		ProcessHistory("USER","keysort","$1","# username $1$2 password <removed>\n");
+	    } elsif ($filter_pwds == 1 && $4 ne "5"){
+		ProcessHistory("USER","keysort","$1","# username $1$2 password <removed>\n");
 	    } else {
 		ProcessHistory("USER","keysort","$1","$_");
 	    }
 	    next;
 	}
 	if (/^(\s*)password / && $filter_pwds >= 1) {
-	    ProcessHistory("LINE-PASS","","","!$1password <removed>\n");
+	    ProcessHistory("LINE-PASS","","","# $1password <removed>\n");
 	    next;
 	}
-	if (/^(\s*)secret / && $filter_pwds >= 2) {
-	    ProcessHistory("LINE-PASS","","","!$1secret <removed>\n");
+	if (/^\s*neighbor (\S*) password / && $filter_pwds >= 1) {
+	    ProcessHistory("","","","# neighbor $1 password <removed>\n");
 	    next;
 	}
-	# filter out any RCS/CVS tags to avoid confusing local CVS storage
-	s/\$(Revision|Id):/ $1:/;
-	# order arp lists
-	/^arp\s+(\d+\.\d+\.\d+\.\d+)\s+/ &&
-	    ProcessHistory("ARP","$aclsort","$1","$_") && next;
-
 	# order logging statements
-	/^logging host (\d+\.\d+\.\d+\.\d+)/ &&
+	/^logging (\d+\.\d+\.\d+\.\d+)/ &&
 	    ProcessHistory("LOGGING","ipsort","$1","$_") && next;
-	# order/prune snmp-server host statements
-	# we only prune lines of the form
-	# snmp-server host a.b.c.d <community>
-	if (/^snmp-server trap-dest (\d+\.\d+\.\d+\.\d+) /) {
-	    if ($filter_commstr) {
-		my($ip) = $1;
-		my($line) = "snmp-server host $ip";
-		my(@tokens) = split(' ', $');
-		my($token);
-		while ($token = shift(@tokens)) {
-		    if ($token eq 'version') {
-			$line .= " " . join(' ', ($token, shift(@tokens)));
-			if ($token eq '3') {
-			    $line .= " " . join(' ', ($token, shift(@tokens)));
-			}
-		    } elsif ($token eq 'vrf') {
-			$line .= " " . join(' ', ($token, shift(@tokens)));
-		    } elsif ($token =~ /^(informs?|traps?|(no)?auth)$/) {
-			$line .= " " . $token;
-		    } else {
-			$line = "!$line " . join(' ', ("<removed>", join(' ',@tokens)));
-			last;
-		    }
-		}
-		ProcessHistory("SNMPSERVERHOST","ipsort","$ip","$line\n");
-	    } else {
-		ProcessHistory("SNMPSERVERHOST","ipsort","$1","$_");
-	    }
-	    next;
+	# order/prune tacacs/radius server statements
+	if (/^(tacacs-server|radius-server) key / && $filter_pwds >= 1) {
+	    ProcessHistory("","","","# $1 key <removed>\n"); next;
 	}
-	if (/^(snmp community) (\S+)/) {
-	    if ($filter_commstr) {
-		ProcessHistory("SNMPSERVERCOMM","keysort","$_","!$1 <removed>$'") && next;
-	    } else {
-		ProcessHistory("SNMPSERVERCOMM","keysort","$_","$_") && next;
-	    }
-	}
-	# prune tacacs/radius server keys
-	if (/^((tacacs-server|radius-server)\s(\w*[-\s(\s\S+])*\s?key) \d \w+/
-							&& $filter_pwds >= 1) {
-	    ProcessHistory("","","","!$1 <removed>$'"); next;
-	}
-
+	# order clns host statements
+	/^clns host \S+ (\S+)/ &&
+	    ProcessHistory("CLNS","keysort","$1","$_") && next;
+	# order alias statements
+	/^alias / && ProcessHistory("ALIAS","keysort","$_","$_") && next;
 	# delete ntp auth password - this md5 is a reversable too
 	if (/^(ntp authentication-key \d+ md5) / && $filter_pwds >= 1) {
-	    ProcessHistory("","","","!$1 <removed>\n"); next;
+	    ProcessHistory("","","","# $1 <removed>\n"); next;
 	}
 	# order ntp peers/servers
 	if (/^ntp (server|peer) (\d+)\.(\d+)\.(\d+)\.(\d+)/) {
@@ -376,21 +488,21 @@ sub WriteTerm {
 	    ProcessHistory("NTP","keysort",$sortkey,"$_");
 	    next;
 	}
+	# order ip host line statements
+	/^ip host line(\d+)/ &&
+	    ProcessHistory("IPHOST","numsort","$1","$_") && next;
+	# order ip nat source static statements
+	/^ip nat (\S+) source static (\S+)/ &&
+	    ProcessHistory("IP NAT $1","ipsort","$2","$_") && next;
 
 	# catch anything that wasnt matched above.
 	ProcessHistory("","","","$_");
-	# end of config.  the ": " game is for the PIX
-	if (/^(: +)?end$/) {
-	    $found_end = 1;
-	    return(1);
-	}
     }
-    # The AGM lacks a definitive "end of config" marker.  If we have seen at
-    # least 5 lines of write term o/p, we can be reasonably sure that we got
-    # the config.
-    if ($linecnt > 5) {
-	$found_end = 1;
-	return(1);
+
+    if ($lines < 3) {
+	printf(STDERR "ERROR: $host configuration appears truncated.\n");
+	$found_end = 0;
+	return(-1);
     }
 
     return(0);
@@ -401,9 +513,17 @@ sub DoNothing {print STDOUT;}
 
 # Main
 @commandtable = (
-	{'show version'			=> 'ShowVersion'},
-	{'show diagnostic-info'		=> 'ShowDiag'},
-	{'show running-config'		=> 'WriteTerm'},
+	{'bigpipe version'		=> 'ShowVersion'},
+	{'bigpipe platform'		=> 'ShowPlatform'},
+	{'cat /config/bigip.license'	=> 'ShowLicense'},
+	{'bigpipe monitor list all'	=> 'ShowMonitor'},
+	{'bigpipe profile list'		=> 'ShowProfile'},
+	{'bigpipe base list'		=> 'ShowBaseRun'},
+	{'bigpipe db show'		=> 'ShowDb'},
+	{'bigpipe route static show'	=> 'ShowRouteStatic'},
+	{'ls --full-time --color=never /config/ssl/ssl.crt' => 'ShowSslCrt'},
+	{'ls --full-time --color=never /config/ssl/ssl.key' => 'ShowSslKey'},
+	{'bigpipe list'			=> 'WriteTerm'}
 );
 # Use an array to preserve the order of the commands and a hash for mapping
 # commands to the subroutine and track commands that have been completed.
@@ -432,13 +552,13 @@ if ($file) {
     print STDOUT "opening file $host\n" if ($log);
     open(INPUT,"<$host") || die "open failed for $host: $!\n";
 } else {
-    print STDERR "executing hlogin -t $timeo -c\"$cisco_cmds\" $host\n" if ($debug);
-    print STDOUT "executing hlogin -t $timeo -c\"$cisco_cmds\" $host\n" if ($log);
+    print STDERR "executing clogin -t $timeo -c\"$cisco_cmds\" $host\n" if ($debug);
+    print STDOUT "executing clogin -t $timeo -c\"$cisco_cmds\" $host\n" if ($log);
     if (defined($ENV{NOPIPE})) {
-	system "hlogin -t $timeo -c \"$cisco_cmds\" $host </dev/null > $host.raw 2>&1" || die "hlogin failed for $host: $!\n";
-	open(INPUT, "< $host.raw") || die "hlogin failed for $host: $!\n";
+	system "clogin -t $timeo -c \"$cisco_cmds\" $host </dev/null > $host.raw 2>&1" || die "clogin failed for $host: $!\n";
+	open(INPUT, "< $host.raw") || die "clogin failed for $host: $!\n";
     } else {
-	open(INPUT,"hlogin -t $timeo -c \"$cisco_cmds\" $host </dev/null |") || die "hlogin failed for $host: $!\n";
+	open(INPUT,"clogin -t $timeo -c \"$cisco_cmds\" $host </dev/null |") || die "clogin failed for $host: $!\n";
     }
 }
 
@@ -462,15 +582,12 @@ if ($ENV{"FILTER_PWDS"} =~ /no/i) {
     $filter_pwds = 1;
 }
 
-ProcessHistory("","","","!RANCID-CONTENT-TYPE: AGM\n!\n");
-ProcessHistory("COMMENTS","keysort","B0","!\n");
-ProcessHistory("COMMENTS","keysort","C0","!\n");
+ProcessHistory("","","","#RANCID-CONTENT-TYPE: bigip\n#\n");
+ProcessHistory("COMMENTS","keysort","A1","#\n");
+ProcessHistory("COMMENTS","keysort","B0","#\n");
+ProcessHistory("COMMENTS","keysort","C0","#\n");
 TOP: while(<INPUT>) {
     tr/\015//d;
-    if (/[>#]\s?exit$/) {
-	$clean_run=1;
-	last;
-    }
     if (/^Error:/) {
 	print STDOUT ("$host clogin error: $_");
 	print STDERR ("$host clogin error: $_") if ($debug);
@@ -496,10 +613,10 @@ TOP: while(<INPUT>) {
 	    $clean_run = 0;
 	    last TOP;
 	}
-	if (/[>#]\s?exit$/) {
-	    $clean_run=1;
-	    last;
-	}
+    }
+    if (/\#\s?exit$/) {
+	$clean_run=1;
+	last;
     }
 }
 print STDOUT "Done $logincmd: $_\n" if ($log);
