@@ -50,8 +50,8 @@ AUTOMAKE_OPTIONS=foreign
 
 bin_PROGRAMS = hpuifilter
 bin_SCRIPTS = agmrancid alogin arancid avologin avorancid blogin brancid \
-	cat5rancid clogin control_rancid cssrancid elogin erancid f10rancid \
-	flogin fnrancid francid hlogin hrancid htlogin htrancid \
+	cat5rancid clogin control_rancid cssrancid elogin erancid f5rancid \
+	f10rancid flogin fnrancid francid hlogin hrancid htlogin htrancid \
 	jerancid jlogin jrancid mrancid mrvlogin mrvrancid nlogin nrancid \
 	nslogin nsrancid nxrancid par prancid rancid-fe rancid rivlogin \
 	rivrancid rrancid srancid tlogin tntlogin tntrancid trancid xrancid \
@@ -125,3 +125,5 @@ rancid-run: Makefile $(srcdir)/rancid-run.in
 	$(auto_edit) $(srcdir)/rancid-run.in >rancid-run.tmp; \
 	chmod +x rancid-run.tmp; \
 	mv rancid-run.tmp rancid-run
+
+$(bin_PROGRAMS) $(bin_SCRIPTS): ../include/version.h
