@@ -811,7 +811,7 @@ foreach router [lrange $argv $i end] {
     }
     set p_prompt [find passprompt $router]
     if { "$p_prompt" == "" } {
-	set p_prompt "(\[Pp]assword|passwd):"
+	set p_prompt "(\[Pp]assword|passwd|Enter password for \[^ :]+):"
     } else {
 	set p_prompt [join [lindex $p_prompt 0] ""]
     }
@@ -882,6 +882,8 @@ foreach router [lrange $argv $i end] {
 	# command is "set length 0"; otherwise its "terminal length 0".
 	if [ regexp -- ".*> .*enable" "$prompt" ] {
 	    send "set length 0\r"
+	    expect -re $prompt  {}
+	    send "set width 80\r"
 	    expect -re $prompt	{}
 	    send "set logging session disable\r"
 	} else {
