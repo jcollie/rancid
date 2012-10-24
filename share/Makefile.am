@@ -3,7 +3,7 @@
 
 ## $Id$
 ##
-## Copyright (c) 1997-2008 by Terrapin Communications, Inc.
+## Copyright (c) 1997-2012 by Terrapin Communications, Inc.
 ## All rights reserved.
 ##
 ## This code is derived from software contributed to and maintained by
@@ -69,7 +69,9 @@ auto_edit = sed \
 	-e 's,@prefix\@,$(prefix),g' \
 	-e 's,@localstatedir\@,$(localstatedir),g' \
 	-e 's,@sysconfdir\@,$(sysconfdir),g' \
-	-e 's,@pkgdatadir\@,$(pkgdatadir),g'
+	-e 's,@pkgdatadir\@,$(pkgdatadir),g' \
+	-e 's,@ADMINMAILPLUS\@,$(ADMINMAILPLUS),g' \
+	-e 's,@MAILPLUS\@,$(MAILPLUS),g'
 
 downreport: Makefile $(srcdir)/downreport.in
 	rm -f downreport downreport.tmp; \
